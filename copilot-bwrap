@@ -1,0 +1,434 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  copilot-bwrap [wrapper-options] [copilot-args...]
+  copilot-bwrap [wrapper-options] -- [copilot-args...]
+
+Wrapper options:
+  --rw-bind PATH    Re-expose a host path read-write at the same absolute path.
+  --ro-bind PATH    Re-expose a host path read-only at the same absolute path.
+  --hide PATH       Hide an additional directory tree with an empty tmpfs.
+  --state-dir PATH  Use PATH as the persistent host backing store for sandbox $HOME.
+  --no-host-copilot Do not bind the host ~/.copilot; use the private sandbox copy instead.
+  --no-bind-pwd     Do not re-expose the current working directory automatically.
+  --help            Show this help.
+
+Defaults:
+  * Network stays enabled.
+  * Tails proxy preload is preserved if present.
+  * HISTFILE is forced to /dev/null inside the sandbox.
+  * Your real ~/.copilot is bound into the sandbox by default.
+  * The current working directory is auto-bound read-write unless it is a hidden-tree root
+    or anywhere under /run/user/<uid>.
+  * The host trees below are hidden unless you bind paths back in:
+      - $HOME
+      - /live
+      - /run/user/<uid>
+      - /mnt
+      - /media
+      - Tails persistence aliases such as /run/nosymfollow and persistence-backed mounts
+  * A persistent sandbox home is created under ~/.copilot-bwrap/default/home.
+  * If no Copilot arguments are given, this runs plain `copilot`.
+
+Examples:
+  copilot-bwrap
+  copilot-bwrap --allow-all
+  copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --allow-all
+  copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --hide /srv -- -i "review this repo" --allow-all
+  copilot-bwrap --no-host-copilot login
+EOF
+}
+
+HOST_HOME=${HOME:?}
+HOST_USER=${USER:-$(id -un)}
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+HOST_SHELL=${SHELL:-/bin/bash}
+HOST_PWD=$(pwd -P)
+COPILOT_BIN=${COPILOT_BIN:-$(command -v copilot)}
+SANDBOX_HOME=/home/$HOST_USER
+DEFAULT_STATE_DIR=$HOST_HOME/.copilot-bwrap/default
+STATE_DIR=$DEFAULT_STATE_DIR
+USE_HOST_COPILOT=1
+BIND_PWD=1
+
+declare -a RW_BINDS=()
+declare -a RO_BINDS=()
+declare -a HIDE_PATHS=()
+declare -a CLI_RW_BINDS=()
+declare -a CLI_RO_BINDS=()
+declare -a CLI_HIDE_PATHS=()
+declare -a TAILS_PERSISTENCE_MOUNTS=()
+declare -a COPILOT_ARGS=()
+declare -a BWRAP_ARGS=()
+declare -a EXTRA_DIRS=()
+
+while (($#)); do
+  case "$1" in
+    --rw-bind)
+      [[ $# -ge 2 ]] || { echo "missing argument for --rw-bind" >&2; exit 2; }
+      CLI_RW_BINDS+=("$2")
+      shift 2
+      ;;
+    --ro-bind)
+      [[ $# -ge 2 ]] || { echo "missing argument for --ro-bind" >&2; exit 2; }
+      CLI_RO_BINDS+=("$2")
+      shift 2
+      ;;
+    --hide)
+      [[ $# -ge 2 ]] || { echo "missing argument for --hide" >&2; exit 2; }
+      CLI_HIDE_PATHS+=("$2")
+      shift 2
+      ;;
+    --state-dir)
+      [[ $# -ge 2 ]] || { echo "missing argument for --state-dir" >&2; exit 2; }
+      STATE_DIR=$2
+      shift 2
+      ;;
+    --no-host-copilot)
+      USE_HOST_COPILOT=0
+      shift
+      ;;
+    --no-bind-pwd)
+      BIND_PWD=0
+      shift
+      ;;
+    --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      COPILOT_ARGS=("$@")
+      break
+      ;;
+    *)
+      COPILOT_ARGS=("$@")
+      break
+      ;;
+  esac
+done
+
+if [[ -z $COPILOT_BIN || ! -x $COPILOT_BIN ]]; then
+  echo "copilot executable not found" >&2
+  exit 1
+fi
+
+if [[ $STATE_DIR != /* ]]; then
+  echo "--state-dir must be an absolute path" >&2
+  exit 2
+fi
+
+HOST_SANDBOX_HOME=$STATE_DIR/home
+install -d -m 700 \
+  "$HOST_SANDBOX_HOME" \
+  "$HOST_SANDBOX_HOME/.config" \
+  "$HOST_SANDBOX_HOME/.cache" \
+  "$HOST_SANDBOX_HOME/.local/bin" \
+  "$HOST_SANDBOX_HOME/.local/share" \
+  "$HOST_SANDBOX_HOME/.local/state" \
+  "$HOST_SANDBOX_HOME/bin"
+
+if (( ! USE_HOST_COPILOT )) || [[ ! -d $HOST_HOME/.copilot ]]; then
+  install -d -m 700 "$HOST_SANDBOX_HOME/.copilot/logs"
+fi
+
+declare -A seen_rw=()
+declare -A seen_ro=()
+declare -A seen_hide=()
+declare -A seen_dirs=()
+
+add_rw_bind() {
+  local path=$1
+  [[ -e $path ]] || { echo "rw bind path does not exist: $path" >&2; exit 2; }
+  [[ $path == /* ]] || { echo "rw bind path must be absolute: $path" >&2; exit 2; }
+  [[ -z ${seen_rw["$path"]+x} ]] || return 0
+  seen_rw["$path"]=1
+  RW_BINDS+=("$path")
+}
+
+add_ro_bind() {
+  local path=$1
+  [[ -e $path ]] || return 0
+  [[ $path == /* ]] || { echo "ro bind path must be absolute: $path" >&2; exit 2; }
+  [[ -z ${seen_ro["$path"]+x} ]] || return 0
+  seen_ro["$path"]=1
+  RO_BINDS+=("$path")
+}
+
+add_hide_path() {
+  local path=$1
+  [[ $path == /* ]] || { echo "hide path must be absolute: $path" >&2; exit 2; }
+  [[ -z ${seen_hide["$path"]+x} ]] || return 0
+  seen_hide["$path"]=1
+  HIDE_PATHS+=("$path")
+}
+
+add_extra_dir() {
+  local path=$1
+  [[ -n $path && $path == /* ]] || return 0
+  [[ -z ${seen_dirs["$path"]+x} ]] || return 0
+  seen_dirs["$path"]=1
+  EXTRA_DIRS+=("$path")
+}
+
+path_is_within() {
+  local path=$1
+  local root=$2
+  [[ $path == "$root" || $path == "$root/"* ]]
+}
+
+path_is_hidden_by_default() {
+  local path=$1
+  path_is_within "$path" "$HOST_HOME" ||
+    path_is_within "$path" /live ||
+    path_is_within "$path" /run/user/$HOST_UID ||
+    path_is_within "$path" /mnt ||
+    path_is_within "$path" /media
+}
+
+path_is_under_hidden_path() {
+  local path=$1
+  local hidden
+
+  for hidden in "${HIDE_PATHS[@]}"; do
+    [[ -n $hidden ]] || continue
+    path_is_within "$path" "$hidden" && return 0
+  done
+
+  return 1
+}
+
+path_is_explicitly_exposed() {
+  local path=$1
+  local bound
+  for bound in "${RW_BINDS[@]}" "${RO_BINDS[@]}"; do
+    [[ -n $bound ]] || continue
+    path_is_within "$path" "$bound" && return 0
+  done
+  return 1
+}
+
+pwd_is_safe_for_auto_bind() {
+  local path=$1
+  local hidden
+
+  case "$path" in
+    /run/user/"$HOST_UID"|/run/user/"$HOST_UID"/*)
+      return 1
+      ;;
+    /run/nosymfollow|/run/nosymfollow/*)
+      return 1
+      ;;
+    "$HOST_HOME"|/live|/mnt|/media)
+      return 1
+      ;;
+  esac
+
+  for hidden in "${TAILS_PERSISTENCE_MOUNTS[@]}"; do
+    [[ -n $hidden ]] || continue
+    if path_is_within "$hidden" "$HOST_HOME" || path_is_within "$hidden" /live || path_is_within "$hidden" /mnt || path_is_within "$hidden" /media; then
+      continue
+    fi
+    path_is_within "$path" "$hidden" && return 1
+  done
+
+  return 0
+}
+
+collect_tails_persistence_mounts() {
+  awk '
+    {
+      split($0, halves, " - ")
+      if (length(halves) != 2) {
+        next
+      }
+
+      pre_count = split(halves[1], pre, " ")
+      post_count = split(halves[2], post, " ")
+      if (pre_count < 5 || post_count < 2) {
+        next
+      }
+
+      mountpoint = pre[5]
+      source = post[2]
+      if (source == "/dev/mapper/TailsData_unlocked") {
+        print mountpoint
+      }
+    }
+  ' /proc/self/mountinfo
+}
+
+ensure_destination_parent() {
+  local dest=$1
+  local parent rel current
+  parent=$(dirname "$dest")
+
+  if [[ $dest == "$HOST_HOME" || $dest == "$HOST_HOME/"* ]]; then
+    rel=${parent#"$HOST_HOME"}
+    rel=${rel#/}
+    if [[ -n $rel && $rel != "." ]]; then
+      install -d -m 700 "$HOST_SANDBOX_HOME/$rel"
+    fi
+    return 0
+  fi
+
+  case "$dest" in
+    /live|/live/*)
+      current=/live
+      ;;
+    /run/user/"$HOST_UID"|/run/user/"$HOST_UID"/*)
+      current=/run/user/$HOST_UID
+      ;;
+    /mnt|/mnt/*)
+      current=/mnt
+      ;;
+    /media|/media/*)
+      current=/media
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  rel=${parent#"$current"}
+  rel=${rel#/}
+  IFS=/ read -r -a parts <<<"$rel"
+  for part in "${parts[@]}"; do
+    [[ -n $part ]] || continue
+    current=$current/$part
+    add_extra_dir "$current"
+  done
+}
+
+add_hide_path "$HOST_HOME"
+add_hide_path /live
+add_hide_path /run/user/$HOST_UID
+add_hide_path /mnt
+add_hide_path /media
+add_hide_path /run/nosymfollow
+
+while IFS= read -r path; do
+  [[ -n $path ]] || continue
+  TAILS_PERSISTENCE_MOUNTS+=("$path")
+  add_hide_path "$path"
+done < <(collect_tails_persistence_mounts)
+
+for path in "${CLI_HIDE_PATHS[@]}"; do
+  add_hide_path "$path"
+done
+
+for path in "${CLI_RO_BINDS[@]}"; do
+  add_ro_bind "$path"
+done
+
+for path in "${CLI_RW_BINDS[@]}"; do
+  add_rw_bind "$path"
+done
+
+if ((BIND_PWD)) && pwd_is_safe_for_auto_bind "$HOST_PWD"; then
+  add_rw_bind "$HOST_PWD"
+elif ((BIND_PWD)) && path_is_under_hidden_path "$HOST_PWD"; then
+  printf 'copilot-bwrap: refusing to auto-bind unsafe cwd %s; use --rw-bind/--ro-bind explicitly if intended\n' "$HOST_PWD" >&2
+fi
+
+if (( USE_HOST_COPILOT )) && [[ -d $HOST_HOME/.copilot ]]; then
+  add_rw_bind "$HOST_HOME/.copilot"
+fi
+
+add_ro_bind "$COPILOT_BIN"
+
+add_ro_bind "$HOST_HOME/.torsocks.conf"
+add_ro_bind "$HOST_HOME/bin/rebar3"
+add_ro_bind "$HOST_HOME/bin/rebar3-tor"
+if [[ -d $HOST_HOME/Persistent/rebar3/config ]]; then
+  add_rw_bind "$HOST_HOME/Persistent/rebar3/config"
+fi
+if [[ -d $HOST_HOME/Persistent/rebar3/cache ]]; then
+  add_rw_bind "$HOST_HOME/Persistent/rebar3/cache"
+fi
+
+for path in "${RW_BINDS[@]}" "${RO_BINDS[@]}"; do
+  ensure_destination_parent "$path"
+done
+
+BWRAP_ARGS+=(
+  --die-with-parent
+  --new-session
+  --unshare-all
+  --share-net
+  --unshare-user
+  --disable-userns
+  --assert-userns-disabled
+  --uid "$HOST_UID"
+  --gid "$HOST_GID"
+  --hostname copilot-sandbox
+  --clearenv
+  --ro-bind / /
+  --proc /proc
+  --dev /dev
+)
+
+for hidden in "${HIDE_PATHS[@]}"; do
+  BWRAP_ARGS+=(--tmpfs "$hidden")
+done
+
+BWRAP_ARGS+=(
+  --dir "$SANDBOX_HOME"
+  --bind "$HOST_SANDBOX_HOME" "$SANDBOX_HOME"
+  --tmpfs /tmp
+)
+
+BWRAP_ARGS+=(--dir /tmp/runtime-"$HOST_UID" --chmod 700 /tmp/runtime-"$HOST_UID")
+
+if [[ ! -L /var/tmp ]]; then
+  BWRAP_ARGS+=(--tmpfs /var/tmp)
+fi
+
+for dir in "${EXTRA_DIRS[@]}"; do
+  BWRAP_ARGS+=(--dir "$dir")
+done
+
+for path in "${RO_BINDS[@]}"; do
+  BWRAP_ARGS+=(--ro-bind "$path" "$path")
+done
+
+for path in "${RW_BINDS[@]}"; do
+  BWRAP_ARGS+=(--bind "$path" "$path")
+done
+
+BWRAP_ARGS+=(
+  --setenv HOME "$SANDBOX_HOME"
+  --setenv HISTFILE /dev/null
+  --setenv USER "$HOST_USER"
+  --setenv LOGNAME "$HOST_USER"
+  --setenv SHELL "$HOST_SHELL"
+  --setenv PATH "${PATH:-/usr/local/bin:/usr/bin:/bin}"
+  --setenv LANG "${LANG:-C.UTF-8}"
+  --setenv TERM "${TERM:-xterm-256color}"
+  --setenv XDG_CONFIG_HOME "$SANDBOX_HOME/.config"
+  --setenv XDG_CACHE_HOME "$SANDBOX_HOME/.cache"
+  --setenv XDG_DATA_HOME "$SANDBOX_HOME/.local/share"
+  --setenv XDG_STATE_HOME "$SANDBOX_HOME/.local/state"
+  --setenv XDG_RUNTIME_DIR /tmp/runtime-"$HOST_UID"
+  --setenv TMPDIR /tmp
+)
+
+for name in COLORTERM LD_PRELOAD PROXYCHAINS_CONF_FILE TORSOCKS_CONF_FILE \
+  http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy \
+  COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN SSL_CERT_FILE SSL_CERT_DIR; do
+  if [[ -n ${!name-} ]]; then
+    BWRAP_ARGS+=(--setenv "$name" "${!name}")
+  fi
+done
+
+SANDBOX_CWD=$HOST_PWD
+if path_is_under_hidden_path "$HOST_PWD" && ! path_is_explicitly_exposed "$HOST_PWD"; then
+  SANDBOX_CWD=/
+fi
+
+BWRAP_ARGS+=(--chdir "$SANDBOX_CWD" -- "$COPILOT_BIN")
+exec bwrap "${BWRAP_ARGS[@]}" "${COPILOT_ARGS[@]}"
