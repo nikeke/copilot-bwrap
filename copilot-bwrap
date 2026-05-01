@@ -447,15 +447,9 @@ fi
 
 add_ro_bind "$COPILOT_BIN"
 
+add_ro_bind "$HOST_HOME/.proxychains/proxychains.conf"
 add_ro_bind "$HOST_HOME/.torsocks.conf"
-add_ro_bind "$HOST_HOME/bin/rebar3"
-add_ro_bind "$HOST_HOME/bin/rebar3-tor"
-if [[ -d $HOST_HOME/Persistent/rebar3/config ]]; then
-  add_rw_bind "$HOST_HOME/Persistent/rebar3/config"
-fi
-if [[ -d $HOST_HOME/Persistent/rebar3/cache ]]; then
-  add_rw_bind "$HOST_HOME/Persistent/rebar3/cache"
-fi
+add_ro_bind "$HOST_HOME/.gitconfig"
 
 for path in "${RW_BINDS[@]}" "${RO_BINDS[@]}"; do
   ensure_destination_parent "$path"

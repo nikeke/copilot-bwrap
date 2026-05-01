@@ -5,7 +5,7 @@
 ## What it does
 
 - keeps the Tails proxy preload (`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libproxychains.so.4`)
-- forces `HISTFILE=/dev/null` inside the sandbox
+- forces `HISTFILE=/dev/null` inside the sandbox to avoid a Copilot bug that destroys bash history.
 - hides `$HOME`, `/live`, `/run/user/<uid>`, `/mnt`, `/media`, `/run/nosymfollow`, and Tails persistence-backed mountpoints
 - auto-binds the current working directory only when it is not under a hidden path
 - binds the host `~/.copilot` by default unless you pass `--no-host-copilot`
@@ -100,11 +100,4 @@ Special-casing is needed when a tool depends on hidden per-user or persistence-b
 - user-managed wrappers that expect extra environment or config files such as `~/.torsocks.conf`
 - writable persistent state outside the current project tree
 
-`rebar3` is handled explicitly because this Tails setup uses wrappers in `~/bin` plus persistent config and cache under `~/Persistent/rebar3/`.
-
 If you later install tools such as `cargo`, `uv`, `pipx`, `npm`, `pnpm`, or other home-managed toolchains, the rule is the same: bind only the exact executable and exact config/cache/state paths that the tool needs. Avoid broad binds of `~/.local`, `~/.cargo`, `~/.config`, or `/run/user/<uid>` unless you intentionally want to weaken the sandbox boundary.
-
-## Notes
-
-- This wrapper does **not** add `--allow-all`; pass that explicitly when you want it.
-- Mouse behavior is left entirely to normal Copilot arguments or your own shell wrapper.
