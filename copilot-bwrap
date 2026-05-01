@@ -11,6 +11,8 @@ Wrapper options:
   --rw-bind PATH    Re-expose a host path read-write at the same absolute path.
   --ro-bind PATH    Re-expose a host path read-only at the same absolute path.
   --hide PATH       Hide an additional directory tree with an empty tmpfs.
+  --allow-detach    Do not use bwrap --die-with-parent; allow sandboxed background
+                    children to survive after the launcher exits.
   --host-keyring-token
                     Read the Copilot token from the host Secret Service and pass it
                     as COPILOT_GITHUB_TOKEN inside the sandbox.
@@ -24,6 +26,7 @@ Defaults:
   * Tails proxy preload is preserved if present.
   * HISTFILE is forced to /dev/null inside the sandbox.
   * Your real ~/.copilot is bound into the sandbox by default.
+  * The sandbox dies with the wrapper process unless you pass --allow-detach.
   * The current working directory is auto-bound read-write unless it is a hidden-tree root
     or anywhere under /run/user/<uid>.
   * The host trees below are hidden unless you bind paths back in:
@@ -42,6 +45,7 @@ Examples:
   copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --allow-all
   copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --hide /srv -- -i "review this repo" --allow-all
   copilot-bwrap --no-host-copilot login
+  copilot-bwrap --allow-detach --allow-all
   copilot-bwrap --host-keyring-token --no-host-copilot --allow-all
 EOF
 }
@@ -58,6 +62,7 @@ DEFAULT_STATE_DIR=$HOST_HOME/.copilot-bwrap/default
 STATE_DIR=$DEFAULT_STATE_DIR
 USE_HOST_COPILOT=1
 USE_HOST_KEYRING_TOKEN=0
+ALLOW_DETACH=0
 BIND_PWD=1
 
 declare -a RW_BINDS=()
@@ -87,6 +92,10 @@ while (($#)); do
       [[ $# -ge 2 ]] || { echo "missing argument for --hide" >&2; exit 2; }
       CLI_HIDE_PATHS+=("$2")
       shift 2
+      ;;
+    --allow-detach)
+      ALLOW_DETACH=1
+      shift
       ;;
     --host-keyring-token)
       USE_HOST_KEYRING_TOKEN=1
@@ -456,7 +465,6 @@ for path in "${RW_BINDS[@]}" "${RO_BINDS[@]}"; do
 done
 
 BWRAP_ARGS+=(
-  --die-with-parent
   --new-session
   --unshare-all
   --share-net
@@ -471,6 +479,10 @@ BWRAP_ARGS+=(
   --proc /proc
   --dev /dev
 )
+
+if (( ! ALLOW_DETACH )); then
+  BWRAP_ARGS=(--die-with-parent "${BWRAP_ARGS[@]}")
+fi
 
 for hidden in "${HIDE_PATHS[@]}"; do
   BWRAP_ARGS+=(--tmpfs "$hidden")

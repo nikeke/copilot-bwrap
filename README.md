@@ -9,12 +9,14 @@
 - hides `$HOME`, `/live`, `/run/user/<uid>`, `/mnt`, `/media`, `/run/nosymfollow`, and Tails persistence-backed mountpoints
 - auto-binds the current working directory only when it is not under a hidden path
 - binds the host `~/.copilot` by default unless you pass `--no-host-copilot`
+- kills the sandbox when the wrapper exits unless you pass `--allow-detach`
 
 ## Usage
 
 ```bash
 ./copilot-bwrap
 ./copilot-bwrap --allow-all
+./copilot-bwrap --allow-detach --allow-all
 ./copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --allow-all
 ./copilot-bwrap --no-host-copilot login
 ./copilot-bwrap --host-keyring-token --allow-all
@@ -30,6 +32,7 @@ Wrapper options must come before `--`. Everything after `--` is passed to `copil
 | `--rw-bind PATH` | Re-expose a host path read-write at the same absolute path. |
 | `--ro-bind PATH` | Re-expose a host path read-only at the same absolute path. |
 | `--hide PATH` | Hide an additional host path behind an empty tmpfs. |
+| `--allow-detach` | Omit `bwrap --die-with-parent` so sandboxed background children may survive after the launcher exits. |
 | `--host-keyring-token` | Read the Copilot token from the host Secret Service and pass it in as `COPILOT_GITHUB_TOKEN`. |
 | `--state-dir PATH` | Use `PATH` as the host-backed sandbox home store. |
 | `--no-host-copilot` | Do not bind the host `~/.copilot`; use a sandbox-private `~/.copilot` under `--state-dir` instead. |
@@ -88,6 +91,24 @@ where `<host>` and `<login>` come from `~/.copilot/settings.json`.
 When lookup succeeds, the wrapper exports the token as `COPILOT_GITHUB_TOKEN` only for the sandboxed Copilot process and adds `--secret-env-vars=COPILOT_GITHUB_TOKEN` unless you already set that option yourself.
 
 This is useful when Copilot is logged in via the host keyring and the sandbox intentionally hides the session bus and keyring sockets.
+
+## Detached sandbox children
+
+By default the wrapper uses `bwrap --die-with-parent`, so the sandbox dies when the wrapper process dies.
+
+If you need Copilot to launch watchdogs, monitors, or other detached helpers that survive after the main Copilot process exits, use:
+
+```bash
+./copilot-bwrap --allow-detach ...
+```
+
+This does **not** widen filesystem exposure by itself, but it is still a meaningful security and control tradeoff:
+
+- sandboxed background processes can keep running after you think the session is over
+- they keep their existing network access
+- they keep access to whatever host paths and credentials you exposed to that sandbox
+
+So `--allow-detach` is intentionally opt-in rather than the default.
 
 ## Adding more tools later
 
