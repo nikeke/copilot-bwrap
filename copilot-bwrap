@@ -11,6 +11,9 @@ Wrapper options:
   --rw-bind PATH    Re-expose a host path read-write at the same absolute path.
   --ro-bind PATH    Re-expose a host path read-only at the same absolute path.
   --hide PATH       Hide an additional directory tree with an empty tmpfs.
+  --host-keyring-token
+                    Read the Copilot token from the host Secret Service and pass it
+                    as COPILOT_GITHUB_TOKEN inside the sandbox.
   --state-dir PATH  Use PATH as the persistent host backing store for sandbox $HOME.
   --no-host-copilot Do not bind the host ~/.copilot; use the private sandbox copy instead.
   --no-bind-pwd     Do not re-expose the current working directory automatically.
@@ -39,6 +42,7 @@ Examples:
   copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --allow-all
   copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --hide /srv -- -i "review this repo" --allow-all
   copilot-bwrap --no-host-copilot login
+  copilot-bwrap --host-keyring-token --no-host-copilot --allow-all
 EOF
 }
 
@@ -53,6 +57,7 @@ SANDBOX_HOME=/home/$HOST_USER
 DEFAULT_STATE_DIR=$HOST_HOME/.copilot-bwrap/default
 STATE_DIR=$DEFAULT_STATE_DIR
 USE_HOST_COPILOT=1
+USE_HOST_KEYRING_TOKEN=0
 BIND_PWD=1
 
 declare -a RW_BINDS=()
@@ -82,6 +87,10 @@ while (($#)); do
       [[ $# -ge 2 ]] || { echo "missing argument for --hide" >&2; exit 2; }
       CLI_HIDE_PATHS+=("$2")
       shift 2
+      ;;
+    --host-keyring-token)
+      USE_HOST_KEYRING_TOKEN=1
+      shift
       ;;
     --state-dir)
       [[ $# -ge 2 ]] || { echo "missing argument for --state-dir" >&2; exit 2; }
@@ -174,6 +183,103 @@ add_extra_dir() {
   seen_dirs["$path"]=1
   EXTRA_DIRS+=("$path")
 }
+
+settings_last_logged_in_account() {
+  python3 - "$HOST_HOME/.copilot/settings.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(1)
+
+data = json.loads(path.read_text())
+user = data.get("lastLoggedInUser")
+if not isinstance(user, dict):
+    users = data.get("loggedInUsers")
+    if isinstance(users, list) and users:
+        user = users[0]
+
+if not isinstance(user, dict):
+    raise SystemExit(1)
+
+host = user.get("host")
+login = user.get("login")
+if not host or not login:
+    raise SystemExit(1)
+
+print(f"{host}:{login}")
+PY
+}
+
+lookup_host_keyring_token() {
+  local account token
+
+  command -v secret-tool >/dev/null 2>&1 || {
+    echo "copilot-bwrap: secret-tool is required for --host-keyring-token" >&2
+    return 1
+  }
+
+  account=$(settings_last_logged_in_account) || {
+    echo "copilot-bwrap: could not determine the Copilot keyring account from ~/.copilot/settings.json" >&2
+    return 1
+  }
+
+  token=$(secret-tool lookup service copilot-cli account "$account") || {
+    echo "copilot-bwrap: no Copilot token found in the host keyring for $account" >&2
+    return 1
+  }
+
+  [[ -n $token ]] || {
+    echo "copilot-bwrap: the host keyring returned an empty Copilot token for $account" >&2
+    return 1
+  }
+
+  printf '%s' "$token"
+}
+
+ensure_secret_env_var() {
+  local i arg vars
+
+  for ((i = 0; i < ${#COPILOT_ARGS[@]}; i++)); do
+    arg=${COPILOT_ARGS[i]}
+    case "$arg" in
+      --secret-env-vars=*)
+        vars=${arg#--secret-env-vars=}
+        case ",$vars," in
+          *,COPILOT_GITHUB_TOKEN,*)
+            return 0
+            ;;
+        esac
+        COPILOT_ARGS[i]="--secret-env-vars=$vars,COPILOT_GITHUB_TOKEN"
+        return 0
+        ;;
+      --secret-env-vars)
+        if (( i + 1 < ${#COPILOT_ARGS[@]} )) && [[ ${COPILOT_ARGS[i + 1]} != --* ]]; then
+          vars=${COPILOT_ARGS[i + 1]}
+          case ",$vars," in
+            *,COPILOT_GITHUB_TOKEN,*)
+              return 0
+              ;;
+          esac
+          COPILOT_ARGS[i + 1]="$vars,COPILOT_GITHUB_TOKEN"
+          return 0
+        fi
+        COPILOT_ARGS=("${COPILOT_ARGS[@]:0:i+1}" "COPILOT_GITHUB_TOKEN" "${COPILOT_ARGS[@]:i+1}")
+        return 0
+        ;;
+    esac
+  done
+
+  COPILOT_ARGS=(--secret-env-vars=COPILOT_GITHUB_TOKEN "${COPILOT_ARGS[@]}")
+}
+
+if (( USE_HOST_KEYRING_TOKEN )) && [[ -z ${COPILOT_GITHUB_TOKEN-}${GH_TOKEN-}${GITHUB_TOKEN-} ]]; then
+  COPILOT_GITHUB_TOKEN=$(lookup_host_keyring_token) || exit 1
+  export COPILOT_GITHUB_TOKEN
+  ensure_secret_env_var
+fi
 
 path_is_within() {
   local path=$1

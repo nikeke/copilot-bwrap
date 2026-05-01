@@ -17,6 +17,7 @@
 ./copilot-bwrap --allow-all
 ./copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --allow-all
 ./copilot-bwrap --no-host-copilot login
+./copilot-bwrap --host-keyring-token --allow-all
 ./copilot-bwrap --state-dir "$HOME/.copilot-bwrap/private" --no-host-copilot --allow-all
 ```
 
@@ -29,6 +30,7 @@ Wrapper options must come before `--`. Everything after `--` is passed to `copil
 | `--rw-bind PATH` | Re-expose a host path read-write at the same absolute path. |
 | `--ro-bind PATH` | Re-expose a host path read-only at the same absolute path. |
 | `--hide PATH` | Hide an additional host path behind an empty tmpfs. |
+| `--host-keyring-token` | Read the Copilot token from the host Secret Service and pass it in as `COPILOT_GITHUB_TOKEN`. |
 | `--state-dir PATH` | Use `PATH` as the host-backed sandbox home store. |
 | `--no-host-copilot` | Do not bind the host `~/.copilot`; use a sandbox-private `~/.copilot` under `--state-dir` instead. |
 | `--no-bind-pwd` | Do not auto-bind the current working directory. |
@@ -67,6 +69,25 @@ Use:
 ```
 
 After that, Copilot uses the sandbox-private `~/.copilot` inside `--state-dir`. If you want some different host path instead, disable the default and bind exactly what you want with `--rw-bind` or `--ro-bind`.
+
+## Using the host keyring token
+
+Use:
+
+```bash
+./copilot-bwrap --host-keyring-token ...
+```
+
+The wrapper looks up the host Secret Service item with:
+
+- `service=copilot-cli`
+- `account=<host>:<login>`
+
+where `<host>` and `<login>` come from `~/.copilot/settings.json`.
+
+When lookup succeeds, the wrapper exports the token as `COPILOT_GITHUB_TOKEN` only for the sandboxed Copilot process and adds `--secret-env-vars=COPILOT_GITHUB_TOKEN` unless you already set that option yourself.
+
+This is useful when Copilot is logged in via the host keyring and the sandbox intentionally hides the session bus and keyring sockets.
 
 ## Adding more tools later
 
