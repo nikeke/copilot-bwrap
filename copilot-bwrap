@@ -11,6 +11,9 @@ Wrapper options:
   --rw-bind PATH    Re-expose a host path read-write at the same absolute path.
   --ro-bind PATH    Re-expose a host path read-only at the same absolute path.
   --hide PATH       Hide an additional directory tree with an empty tmpfs.
+  --allow-x11       Re-expose the host X11 socket and auth so sandboxed Copilot can
+                    use features like /copy. This is a meaningful desktop-integration
+                    downgrade and is off by default.
   --allow-detach    Do not use bwrap --die-with-parent; allow sandboxed background
                     children to survive after the launcher exits.
   --host-keyring-token
@@ -26,6 +29,7 @@ Defaults:
   * Tails proxy preload is preserved if present.
   * HISTFILE is forced to /dev/null inside the sandbox.
   * Your real ~/.copilot is bound into the sandbox by default.
+  * X11 access is disabled unless you pass --allow-x11.
   * The sandbox dies with the wrapper process unless you pass --allow-detach.
   * The current working directory is auto-bound read-write unless it is a hidden-tree root
     or anywhere under /run/user/<uid>.
@@ -45,6 +49,7 @@ Examples:
   copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --allow-all
   copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --hide /srv -- -i "review this repo" --allow-all
   copilot-bwrap --no-host-copilot login
+  copilot-bwrap --allow-x11 --allow-all
   copilot-bwrap --allow-detach --allow-all
   copilot-bwrap --host-keyring-token --no-host-copilot --allow-all
 EOF
@@ -62,6 +67,7 @@ DEFAULT_STATE_DIR=$HOST_HOME/.copilot-bwrap/default
 STATE_DIR=$DEFAULT_STATE_DIR
 USE_HOST_COPILOT=1
 USE_HOST_KEYRING_TOKEN=0
+ALLOW_X11=0
 ALLOW_DETACH=0
 BIND_PWD=1
 
@@ -92,6 +98,10 @@ while (($#)); do
       [[ $# -ge 2 ]] || { echo "missing argument for --hide" >&2; exit 2; }
       CLI_HIDE_PATHS+=("$2")
       shift 2
+      ;;
+    --allow-x11)
+      ALLOW_X11=1
+      shift
       ;;
     --allow-detach)
       ALLOW_DETACH=1
@@ -288,6 +298,32 @@ if (( USE_HOST_KEYRING_TOKEN )) && [[ -z ${COPILOT_GITHUB_TOKEN-}${GH_TOKEN-}${G
   COPILOT_GITHUB_TOKEN=$(lookup_host_keyring_token) || exit 1
   export COPILOT_GITHUB_TOKEN
   ensure_secret_env_var
+fi
+
+configure_x11_access() {
+  [[ -n ${DISPLAY-} ]] || {
+    echo "copilot-bwrap: --allow-x11 requires DISPLAY to be set on the host" >&2
+    exit 1
+  }
+
+  [[ -d /tmp/.X11-unix ]] || {
+    echo "copilot-bwrap: --allow-x11 requires /tmp/.X11-unix on the host" >&2
+    exit 1
+  }
+
+  add_ro_bind /tmp/.X11-unix
+
+  if [[ -n ${XAUTHORITY-} ]]; then
+    if [[ $XAUTHORITY != /* ]]; then
+      echo "copilot-bwrap: XAUTHORITY must be an absolute path when using --allow-x11" >&2
+      exit 1
+    fi
+    add_ro_bind "$XAUTHORITY"
+  fi
+}
+
+if (( ALLOW_X11 )); then
+  configure_x11_access
 fi
 
 path_is_within() {
@@ -530,12 +566,19 @@ BWRAP_ARGS+=(
 )
 
 for name in COLORTERM LD_PRELOAD PROXYCHAINS_CONF_FILE TORSOCKS_CONF_FILE \
-  http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy \
-  COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN SSL_CERT_FILE SSL_CERT_DIR; do
+   http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy NO_PROXY no_proxy \
+   COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN SSL_CERT_FILE SSL_CERT_DIR; do
   if [[ -n ${!name-} ]]; then
     BWRAP_ARGS+=(--setenv "$name" "${!name}")
   fi
 done
+
+if (( ALLOW_X11 )); then
+  BWRAP_ARGS+=(--setenv DISPLAY "$DISPLAY")
+  if [[ -n ${XAUTHORITY-} ]]; then
+    BWRAP_ARGS+=(--setenv XAUTHORITY "$XAUTHORITY")
+  fi
+fi
 
 SANDBOX_CWD=$HOST_PWD
 if path_is_under_hidden_path "$HOST_PWD" && ! path_is_explicitly_exposed "$HOST_PWD"; then

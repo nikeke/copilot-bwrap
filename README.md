@@ -10,12 +10,14 @@
 - auto-binds the current working directory only when it is not under a hidden path
 - binds the host `~/.copilot` by default unless you pass `--no-host-copilot`
 - kills the sandbox when the wrapper exits unless you pass `--allow-detach`
+- keeps X11 desktop integration off unless you explicitly pass `--allow-x11`
 
 ## Usage
 
 ```bash
 ./copilot-bwrap
 ./copilot-bwrap --allow-all
+./copilot-bwrap --allow-x11 --allow-all
 ./copilot-bwrap --allow-detach --allow-all
 ./copilot-bwrap --rw-bind "$HOME/Persistent/src/foo" --allow-all
 ./copilot-bwrap --no-host-copilot login
@@ -32,6 +34,7 @@ Wrapper options must come before `--`. Everything after `--` is passed to `copil
 | `--rw-bind PATH` | Re-expose a host path read-write at the same absolute path. |
 | `--ro-bind PATH` | Re-expose a host path read-only at the same absolute path. |
 | `--hide PATH` | Hide an additional host path behind an empty tmpfs. |
+| `--allow-x11` | Re-expose the host X11 socket and Xauthority so sandboxed Copilot can use X11-dependent features such as `/copy`. |
 | `--allow-detach` | Omit `bwrap --die-with-parent` so sandboxed background children may survive after the launcher exits. |
 | `--host-keyring-token` | Read the Copilot token from the host Secret Service and pass it in as `COPILOT_GITHUB_TOKEN`. |
 | `--state-dir PATH` | Use `PATH` as the host-backed sandbox home store. |
@@ -91,6 +94,21 @@ where `<host>` and `<login>` come from `~/.copilot/settings.json`.
 When lookup succeeds, the wrapper exports the token as `COPILOT_GITHUB_TOKEN` only for the sandboxed Copilot process and adds `--secret-env-vars=COPILOT_GITHUB_TOKEN` unless you already set that option yourself.
 
 This is useful when Copilot is logged in via the host keyring and the sandbox intentionally hides the session bus and keyring sockets.
+
+## X11 integration
+
+If you need X11-dependent features such as `/copy`, use:
+
+```bash
+./copilot-bwrap --allow-x11 ...
+```
+
+This re-exposes the host X11 socket and, when set, the host `XAUTHORITY` file. That is a **meaningful security downgrade** compared with the default sandbox:
+
+- X11 access is much broader than clipboard-only access
+- a connected X11 client may be able to observe or inject other desktop input/state
+
+So `--allow-x11` is intentionally explicit and off by default.
 
 ## Detached sandbox children
 
