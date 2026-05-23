@@ -204,31 +204,41 @@ add_extra_dir() {
 }
 
 settings_last_logged_in_account() {
-  python3 - "$HOST_HOME/.copilot/settings.json" <<'PY'
+  python3 - "$HOST_HOME/.copilot/config.json" "$HOST_HOME/.copilot/settings.json" <<'PY'
 import json
 import pathlib
 import sys
 
-path = pathlib.Path(sys.argv[1])
-if not path.is_file():
-    raise SystemExit(1)
+def load_jsonc(path):
+    lines = []
+    for line in path.read_text().splitlines():
+        if line.lstrip().startswith("//"):
+            continue
+        lines.append(line)
+    return json.loads("\n".join(lines))
 
-data = json.loads(path.read_text())
-user = data.get("lastLoggedInUser")
-if not isinstance(user, dict):
-    users = data.get("loggedInUsers")
-    if isinstance(users, list) and users:
-        user = users[0]
+for raw_path in sys.argv[1:]:
+    path = pathlib.Path(raw_path)
+    if not path.is_file():
+        continue
 
-if not isinstance(user, dict):
-    raise SystemExit(1)
+    data = load_jsonc(path)
+    user = data.get("lastLoggedInUser")
+    if not isinstance(user, dict):
+        users = data.get("loggedInUsers")
+        if isinstance(users, list) and users:
+            user = users[0]
 
-host = user.get("host")
-login = user.get("login")
-if not host or not login:
-    raise SystemExit(1)
+    if not isinstance(user, dict):
+        continue
 
-print(f"{host}:{login}")
+    host = user.get("host")
+    login = user.get("login")
+    if host and login:
+        print(f"{host}:{login}")
+        raise SystemExit(0)
+
+raise SystemExit(1)
 PY
 }
 
@@ -241,7 +251,7 @@ lookup_host_keyring_token() {
   }
 
   account=$(settings_last_logged_in_account) || {
-    echo "copilot-bwrap: could not determine the Copilot keyring account from ~/.copilot/settings.json" >&2
+    echo "copilot-bwrap: could not determine the Copilot keyring account from ~/.copilot/config.json or settings.json" >&2
     return 1
   }
 

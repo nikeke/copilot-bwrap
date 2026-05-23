@@ -89,7 +89,8 @@ The wrapper looks up the host Secret Service item with:
 - `service=copilot-cli`
 - `account=<host>:<login>`
 
-where `<host>` and `<login>` come from `~/.copilot/settings.json`.
+where `<host>` and `<login>` come from `~/.copilot/config.json`.
+The wrapper falls back to `~/.copilot/settings.json` for older Copilot versions.
 
 When lookup succeeds, the wrapper exports the token as `COPILOT_GITHUB_TOKEN` only for the sandboxed Copilot process and adds `--secret-env-vars=COPILOT_GITHUB_TOKEN` unless you already set that option yourself.
 
