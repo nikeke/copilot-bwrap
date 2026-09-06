@@ -39,7 +39,8 @@ Defaults:
       - /run/user/<uid>
       - /mnt
       - /media
-      - Tails persistence aliases such as /run/nosymfollow and persistence-backed mounts
+      - Tails persistence aliases such as /run/nosymfollow, persistence-backed mounts,
+        and the current Tails GDM persistence parent /var/lib/gdm3
   * A persistent sandbox home is created under ~/.copilot-bwrap/default/home.
   * If no Copilot arguments are given, this runs plain `copilot`.
 
@@ -78,6 +79,7 @@ declare -a CLI_RW_BINDS=()
 declare -a CLI_RO_BINDS=()
 declare -a CLI_HIDE_PATHS=()
 declare -a TAILS_PERSISTENCE_MOUNTS=()
+declare -a TAILS_HIDDEN_ROOTS=()
 declare -a COPILOT_ARGS=()
 declare -a BWRAP_ARGS=()
 declare -a EXTRA_DIRS=()
@@ -377,6 +379,11 @@ pwd_is_safe_for_auto_bind() {
   local path=$1
   local hidden
 
+  for hidden in "${TAILS_HIDDEN_ROOTS[@]}"; do
+    [[ -n $hidden ]] || continue
+    path_is_within "$path" "$hidden" && return 1
+  done
+
   case "$path" in
     /run/user/"$HOST_UID"|/run/user/"$HOST_UID"/*)
       return 1
@@ -475,7 +482,15 @@ add_hide_path /run/nosymfollow
 while IFS= read -r path; do
   [[ -n $path ]] || continue
   TAILS_PERSISTENCE_MOUNTS+=("$path")
-  add_hide_path "$path"
+  if path_is_within "$path" /var/lib/gdm3; then
+    # Current Tails mounts greeter settings below a Debian-gdm-owned parent.
+    # Hide the parent so bwrap does not need to recreate that inaccessible
+    # nested mountpoint.
+    TAILS_HIDDEN_ROOTS+=(/var/lib/gdm3)
+    add_hide_path /var/lib/gdm3
+  else
+    add_hide_path "$path"
+  fi
 done < <(collect_tails_persistence_mounts)
 
 for path in "${CLI_HIDE_PATHS[@]}"; do

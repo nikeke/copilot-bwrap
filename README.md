@@ -7,6 +7,7 @@
 - keeps the Tails proxy preload (`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libproxychains.so.4`)
 - forces `HISTFILE=/dev/null` inside the sandbox to avoid a Copilot bug that destroys bash history.
 - hides `$HOME`, `/live`, `/run/user/<uid>`, `/mnt`, `/media`, `/run/nosymfollow`, and Tails persistence-backed mountpoints
+- hides the current Tails GDM persistence parent (`/var/lib/gdm3`) when its persistence mount is detected
 - auto-binds the current working directory only when it is not under a hidden path
 - binds the host `~/.copilot` by default unless you pass `--no-host-copilot`
 - kills the sandbox when the wrapper exits unless you pass `--allow-detach`
@@ -141,3 +142,12 @@ Special-casing is needed when a tool depends on hidden per-user or persistence-b
 - writable persistent state outside the current project tree
 
 If you later install tools such as `cargo`, `uv`, `pipx`, `npm`, `pnpm`, or other home-managed toolchains, the rule is the same: bind only the exact executable and exact config/cache/state paths that the tool needs. Avoid broad binds of `~/.local`, `~/.cargo`, `~/.config`, or `/run/user/<uid>` unless you intentionally want to weaken the sandbox boundary.
+
+## Current Tails GDM persistence mount
+
+Current Tails releases mount persistent greeter settings at
+`/var/lib/gdm3/settings/persistent`, below a parent owned by `Debian-gdm`.
+Bubblewrap cannot recreate that nested mountpoint while setting up the
+sandbox, so the wrapper hides `/var/lib/gdm3` when it detects this
+persistence-backed mount. Copilot does not need GDM state, and this keeps the
+persistent greeter data outside the sandbox.
